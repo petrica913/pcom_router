@@ -33,6 +33,49 @@ struct arp_table_entry* get_arp_entry (uint32_t ip) {
 	return NULL;
 }
 
+struct trie_route {
+	struct route_table_entry *key;
+	struct trie_route *left;
+	struct trie_route *right;
+};
+
+struct trie_route *new_node() {
+	struct trie_route *node = (struct trie_route*) malloc(sizeof(struct trie_route));
+	node->left = NULL;
+	node->right = NULL;
+	return node;
+}
+
+struct trie_route *root = NULL;
+
+void add_node(struct trie_route *root, struct route_table_entry *entry) {
+	struct trie_route *current = root;
+	for (int i  = 31; i >= 0; i--) {
+		int bit = (entry->prefix >> i) & 1;
+		if (bit == 0) {
+			if (!current->left)
+				current->left = new_node();
+			current = current->left;
+		}
+		if (!current->right)
+			current->right = new_node();
+		current = current->right;
+	}
+	current->key = entry;
+}
+
+struct route_table_entry *search_route(uint32_t ip_dest, struct trie_route *root) {
+    struct trie_route *current = root;
+    for (int i = 31; i >= 0 && current; i--) {
+        int bit = (ip_dest >> i) & 1;
+        if (bit == 0)
+            current = current->left;
+        else
+            current = current->right;
+    }
+    return current ? current->key : NULL;
+}
+
 struct route_table_entry *get_best_route(uint32_t ip_dest)
 {
 	for (int i = 0; i < rtable_len; i++) {
@@ -40,7 +83,6 @@ struct route_table_entry *get_best_route(uint32_t ip_dest)
 			return rtable + i;
 		}
 	}
-
 	return NULL;
 }
 
@@ -59,7 +101,7 @@ void forwarding(struct packet *packet) {
 		printf("bad checksum\n");
 		return;
 	}
-	struct route_table_entry *best_route = get_best_route(ip_hdr->daddr);
+	struct route_table_entry *best_route = search_route(ip_hdr->daddr, root);
 	if (best_route == NULL) {
 		return;
 	}
@@ -88,6 +130,7 @@ void forwarding(struct packet *packet) {
 	}
 	get_interface_mac(best_route->interface, eth_hdr->ether_shost);
 	memcpy(eth_hdr->ether_dhost, arp_entry->mac, sizeof(arp_entry->mac));
+	// memcpy(eth_hdr->ether_shost, arp_entry->mac, sizeof(arp_entry->mac));
 	send_to_link(best_route->interface, buf, size);
 }
 
@@ -105,6 +148,18 @@ uint32_t convert_ip(char *ip) {
 	return result;
 }
 
+int comparator (const struct route_table_entry *entry1, const struct route_table_entry *entry2) {
+	if (entry1->mask > entry2->mask)
+		return -1;
+	if (entry1->mask < entry2->mask)
+		return 1;
+	if (entry1->prefix > entry2->prefix)
+		return -1;
+	if (entry1->prefix < entry2->mask)
+		return 1;
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	char buf[MAX_PACKET_LEN];
@@ -119,9 +174,15 @@ int main(int argc, char *argv[])
 
 	q = queue_create();
 	rtable_len = read_rtable(argv[1], rtable);
+	qsort(rtable, rtable_len, sizeof(struct route_table_entry), (int (*)(const void*, const void*))comparator);
 	arp_table_size = parse_arp_table("arp_table.txt", arp_table);
 	
 	DIE(rtable_len < 0, "error");
+
+	root = new_node();
+	for (int i = 0; i < rtable_len; i++) {
+		add_node(root, &rtable[i]);
+	}
 
 	while (1) {
 
