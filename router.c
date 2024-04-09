@@ -33,49 +33,6 @@ struct arp_table_entry* get_arp_entry (uint32_t ip) {
 	return NULL;
 }
 
-struct trie_route {
-	struct route_table_entry *key;
-	struct trie_route *left;
-	struct trie_route *right;
-};
-
-struct trie_route *new_node() {
-	struct trie_route *node = (struct trie_route*) malloc(sizeof(struct trie_route));
-	node->left = NULL;
-	node->right = NULL;
-	return node;
-}
-
-struct trie_route *root = NULL;
-
-void add_node(struct trie_route *root, struct route_table_entry *entry) {
-	struct trie_route *current = root;
-	for (int i  = 31; i >= 0; i--) {
-		int bit = (entry->prefix >> i) & 1;
-		if (bit == 0) {
-			if (!current->left)
-				current->left = new_node();
-			current = current->left;
-		}
-		if (!current->right)
-			current->right = new_node();
-		current = current->right;
-	}
-	current->key = entry;
-}
-
-struct route_table_entry *search_route(uint32_t ip_dest, struct trie_route *root) {
-    struct trie_route *current = root;
-    for (int i = 31; i >= 0 && current; i--) {
-        int bit = (ip_dest >> i) & 1;
-        if (bit == 0)
-            current = current->left;
-        else
-            current = current->right;
-    }
-    return current ? current->key : NULL;
-}
-
 struct route_table_entry *get_best_route(uint32_t ip_dest)
 {
 	for (int i = 0; i < rtable_len; i++) {
@@ -84,6 +41,33 @@ struct route_table_entry *get_best_route(uint32_t ip_dest)
 		}
 	}
 	return NULL;
+}
+
+void send_icmp(struct packet *packet, uint8_t type) {
+	printf("TYPE IS: %d", type);
+	struct ether_header *eth_hdr = (struct ether_header*) packet->payload ;
+	memcpy(&eth_hdr->ether_dhost, ((struct ether_header*) packet->payload)->ether_shost, 6);
+	memcpy(&eth_hdr->ether_shost, ((struct ether_header*) packet->payload)->ether_dhost, 6);
+
+	struct iphdr *ip_hdr = (struct iphdr*) (packet->payload + sizeof(struct ether_header));
+	uint32_t aux = ip_hdr->daddr;
+	ip_hdr->daddr = ip_hdr->saddr;
+	ip_hdr->saddr = aux;
+	uint16_t sum = htons(checksum((uint16_t*)ip_hdr, sizeof (struct iphdr)));
+	ip_hdr->check = sum;
+	
+	struct icmphdr *icmp_hdr = (struct icmphdr *)(packet->payload + sizeof(struct ether_header) + sizeof(struct iphdr));
+	icmp_hdr->type = type;
+	icmp_hdr->code = 0;
+	icmp_hdr->checksum = htons(checksum((uint16_t *)icmp_hdr, packet->size - sizeof(struct ether_header)) - sizeof(struct iphdr));
+	
+	struct packet* packet_icmp = (struct packet*) malloc (sizeof (struct packet));
+	memcpy (packet_icmp->payload, eth_hdr, sizeof(struct ether_header));
+	memcpy (packet_icmp->payload + sizeof (struct ether_header), ip_hdr, sizeof(struct iphdr));
+	memcpy (packet_icmp->payload + sizeof (struct ether_header) + sizeof (struct iphdr), icmp_hdr, sizeof (struct icmphdr));
+	packet_icmp->size = sizeof (struct ether_header) + sizeof (struct iphdr) + sizeof (struct icmphdr);
+	packet_icmp->interface = packet->interface;
+	send_to_link(packet_icmp->interface, packet_icmp->payload, packet_icmp->size);
 }
 
 void forwarding(struct packet *packet) {
@@ -101,12 +85,14 @@ void forwarding(struct packet *packet) {
 		printf("bad checksum\n");
 		return;
 	}
-	struct route_table_entry *best_route = search_route(ip_hdr->daddr, root);
+	struct route_table_entry *best_route = get_best_route(ip_hdr->daddr);
 	if (best_route == NULL) {
+		send_icmp(packet, 3);
 		return;
 	}
 	if (ip_hdr->ttl < 1) {
 		printf("no more hops to be made\n");
+		send_icmp(packet, 11);
 		return;
 	}
 	ip_hdr->ttl--;
@@ -179,11 +165,6 @@ int main(int argc, char *argv[])
 	
 	DIE(rtable_len < 0, "error");
 
-	root = new_node();
-	for (int i = 0; i < rtable_len; i++) {
-		add_node(root, &rtable[i]);
-	}
-
 	while (1) {
 
 		int interface;
@@ -197,10 +178,11 @@ int main(int argc, char *argv[])
 		any header field which has more than 1 byte will need to be conerted to
 		host order. For example, ntohs(eth_hdr->ether_type). The oposite is needed when
 		sending a packet on the link, */
-		struct iphdr *ip_hdr = (struct iphdr*) (buf + sizeof(struct ether_header));
-		// if I'm sending an ipv4 protocol than verify if the router is the destination
+		struct iphdr *ip_hdr = (struct iphdr*) (buf + sizeof(struct ether_header));		// if I'm sending an ipv4 protocol than verify if the router is the destination
 		if (ntohs(eth_hdr->ether_type) == ETHERTYPE_IP) {
-			if (ip_hdr->daddr == convert_ip(get_interface_ip(interface))) {
+			if (ip_hdr->daddr == convert_ip(get_interface_ip(interface))) { // daca router-ul meu este destinatia
+				struct packet *new_packet = create_packet(buf, len, interface);
+				//send_icmp(new_packet, 0);
 				continue;
 			} else {
 				struct packet *new_packet = create_packet(buf, len, interface);
