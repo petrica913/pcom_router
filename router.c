@@ -15,7 +15,6 @@ struct packet {
 	char* payload;
 	size_t size;
 	int interface;
-
 };
 
 struct packet *create_packet(char *buf, size_t size, int interface) {
@@ -51,25 +50,7 @@ void swap_mac_addresses(struct ether_header *eth_hdr) {
 	memcpy(eth_hdr->ether_shost, aux, 6);
 }
 
-void send_icmp_reply(char *buf, int interface, int len)
-{
-	struct ether_header *eth_hdr = (struct ether_header *)buf;
-	struct iphdr *ip_hdr = (struct iphdr *) (buf + sizeof(struct ether_header));
-	struct icmphdr *icmp_hdr = (struct icmphdr *) (buf + sizeof(struct ether_header) + sizeof(struct iphdr));
-
-	ip_hdr->daddr = ip_hdr->saddr;
-	ip_hdr->saddr = inet_addr(get_interface_ip(interface));
-	ip_hdr->check = 0;
-	uint16_t sum = htons(checksum((uint16_t *)ip_hdr, sizeof(struct iphdr)));
-	ip_hdr->check = sum;
-
-	icmp_hdr->type = 0;
-
-	swap_mac_addresses(eth_hdr);
-    send_to_link(interface, buf, len);
-}
-
-void send_icmp_error(struct packet* packet, uint8_t type) {
+void send_icmp(struct packet* packet, uint8_t type) {
 	struct ether_header* eth_hdr = (struct ether_header*)packet->payload;
 	swap_mac_addresses(eth_hdr);
 
@@ -94,20 +75,19 @@ void send_icmp_error(struct packet* packet, uint8_t type) {
 	icmp_hdr.un.echo.sequence = 0;
 	icmp_hdr.un.echo.id = 0;	
 
+	if (type == 0) {
+		send_to_link(packet->interface, packet->payload, packet->size);
+		return;
+	}
+
 	char *buf = malloc (sizeof(struct ether_header) + ip_hdr->tot_len);
 	size_t off = 0;
 
 	memcpy(buf, eth_hdr, sizeof( struct ether_header));
-	off += sizeof(struct ether_header);
-
-	memcpy(buf + off, ip_hdr, sizeof(struct iphdr));
-	off += sizeof(struct iphdr);
-
-	memcpy(buf + off, &icmp_hdr, sizeof(struct icmphdr));
-	off += sizeof(struct icmphdr);
-
-	memcpy(buf + off, first_ip, sizeof(struct iphdr) + 8);
-	off += sizeof(struct iphdr) + 8;
+	memcpy(buf + sizeof(struct ether_header), ip_hdr, sizeof(struct iphdr));
+	memcpy(buf + sizeof(struct ether_header) + sizeof(struct iphdr), &icmp_hdr, sizeof(struct icmphdr));
+	memcpy(buf + sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr), first_ip, sizeof(struct iphdr) + 8);
+	off = sizeof(struct ether_header) + 2 * sizeof(struct iphdr) + sizeof(struct icmphdr) + 8;
 
 	ip_hdr->check = htons (checksum((uint16_t *)ip_hdr, sizeof(struct iphdr)));
 	struct icmphdr *buf_icmp = (struct icmphdr*) (buf + sizeof(struct ether_header) + sizeof(struct iphdr));
@@ -116,7 +96,6 @@ void send_icmp_error(struct packet* packet, uint8_t type) {
 }
 
 void forwarding(struct packet *packet) {
-	// printf("forwarding\n");
 	struct ether_header *eth_hdr = (struct ether_header*) (packet->payload);
 	struct iphdr *ip_hdr = (struct iphdr*) (packet->payload + sizeof (struct ether_header));
 	int interface = packet->interface;
@@ -133,17 +112,12 @@ void forwarding(struct packet *packet) {
 	}
 	struct route_table_entry *best_route = get_best_route(ip_hdr->daddr);
 	if (best_route == NULL) {
-		printf("packet type\n");
-
-		send_icmp_error(packet, 3);
+		send_icmp(packet, 3);
 		return;
 	}
 	printf("%u\n", ip_hdr->ttl);
 	if (ip_hdr->ttl <= 1) {
-		printf("packet type\n");
-
-		printf("no more hops to be made\n");
-		send_icmp_error(packet, 11);
+		send_icmp(packet, 11);
 		return;
 	}
 	ip_hdr->ttl--;
@@ -235,18 +209,13 @@ int main(int argc, char *argv[])
 			char *router_ip = get_interface_ip(interface);
 			if (ip_hdr->protocol == 1 && ip_hdr->daddr == inet_addr(get_interface_ip(interface))) {
 				printf("protocol\n");
-					// struct packet *new_packet = create_packet(buf, len, interface);
-					printf("gets hererr\n");
 					struct icmphdr *icmp_hdr = (struct icmphdr *) (buf + sizeof(struct ether_header) + sizeof(struct iphdr));
 					if (icmp_hdr->type == 8) {
 						icmp_hdr->type = 0;
 						struct packet* new_packet = create_packet(buf, len, interface);
-						send_icmp_error(new_packet, 0);
-						
+						send_icmp(new_packet, 0);
 						continue;
-					}
-					// continue;
-				
+					}				
 			} else {
 				struct packet *new_packet = create_packet(buf, len, interface);
 				forwarding(new_packet);
