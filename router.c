@@ -43,6 +43,23 @@ struct route_table_entry *get_best_route(uint32_t ip_dest)
 	return NULL;
 }
 
+struct route_table_entry *get_best_route_bs(uint32_t ip_dest, int left, int right) {
+	if (left <= right) {
+		int mid = (left + right) / 2;
+		if ((ip_dest & rtable[mid].mask) == rtable[mid].prefix) {
+			if (left == right) {
+				return rtable + mid;
+			}
+			return get_best_route_bs(ip_dest, 0, mid);
+		}
+		if ((ip_dest & rtable[mid].mask) < rtable[mid].prefix)
+			return get_best_route_bs(ip_dest, mid + 1, right);
+		return get_best_route_bs(ip_dest, left, mid - 1);
+	}
+	return NULL;
+}
+
+
 void swap_mac_addresses(struct ether_header *eth_hdr) {
 	char *aux[6];
 	memcpy(aux, eth_hdr->ether_dhost, 6);
@@ -68,12 +85,13 @@ void send_icmp(struct packet* packet, uint8_t type) {
 	ip_hdr->tos = 0;
 	ip_hdr->tot_len = htons(2 * sizeof(struct iphdr) + 8 + sizeof(struct icmphdr));
 
-	struct icmphdr icmp_hdr;
-	icmp_hdr.checksum = 0;
-	icmp_hdr.code = 0;
-	icmp_hdr.type = type;
-	icmp_hdr.un.echo.sequence = 0;
-	icmp_hdr.un.echo.id = 0;	
+	struct icmphdr icmp_hdr = {
+		.checksum = 0,
+		.code = 0,
+		.type = type,
+		.un.echo.sequence = 0,
+		.un.echo.id = 0
+	};	
 
 	if (type == 0) {
 		send_to_link(packet->interface, packet->payload, packet->size);
@@ -95,12 +113,30 @@ void send_icmp(struct packet* packet, uint8_t type) {
 	send_to_link(packet->interface, buf, off);
 }
 
+void send_arp(uint32_t daddr, uint32_t saddr, int interface, int arp_type, struct ether_header* eth_hdr) {
+	struct arp_header arp_hdr = {
+		.htype = htons(1),
+		.ptype = htons (ETHERTYPE_IP),
+		.hlen = 6,
+		.plen = 4,
+		.op = htons(arp_type),
+		.spa = saddr,
+		.tpa = daddr
+	};
+
+	memcpy(&arp_hdr.sha, eth_hdr->ether_shost, 6);
+	memcpy(&arp_hdr.tha, eth_hdr->ether_dhost, 6);
+
+	char *buf = malloc(sizeof(struct ether_header) + sizeof(struct arp_header));
+	memcpy(buf, eth_hdr, sizeof(struct ether_header));
+	memcpy(buf + sizeof(struct ether_header), &arp_hdr, sizeof(struct arp_header));
+	send_to_link(interface, buf, sizeof(struct ether_header) + sizeof(struct arp_header));
+}
+
 void forwarding(struct packet *packet) {
 	struct ether_header *eth_hdr = (struct ether_header*) (packet->payload);
 	struct iphdr *ip_hdr = (struct iphdr*) (packet->payload + sizeof (struct ether_header));
-	int interface = packet->interface;
-	size_t size = packet->size;
-	char* buf = packet->payload;
+	
 
 	uint16_t original_csum = ip_hdr->check;
 	ip_hdr->check = 0;
@@ -110,7 +146,7 @@ void forwarding(struct packet *packet) {
 		printf("bad checksum\n");
 		return;
 	}
-	struct route_table_entry *best_route = get_best_route(ip_hdr->daddr);
+	struct route_table_entry *best_route = get_best_route_bs(ip_hdr->daddr, 0, rtable_len - 1);
 	if (best_route == NULL) {
 		send_icmp(packet, 3);
 		return;
@@ -128,21 +164,20 @@ void forwarding(struct packet *packet) {
 	struct arp_table_entry *arp_entry = get_arp_entry(best_route->next_hop);
 	if (arp_entry == NULL) {
 		printf("%d\n", arp_table_size);
-		// struct packet *temp = malloc(sizeof(struct packet));
-		// memcpy(temp, &packet, sizeof(packet));
-		// eth_hdr->ether_type = htons(ETHERTYPE_ARP);
-		// for (int i = 0; i < 6; i++) {
-		// 	eth_hdr->ether_dhost[i] = 0xFF;
-		// }
-		// get_interface_mac(best_route->interface, eth_hdr->ether_shost);
-		// queue_enq(q, temp);
-		// // aici trebuie facut un send_arp
+		struct packet *temp = malloc(sizeof(struct packet));
+		memcpy(temp, &packet, sizeof(packet));
+		eth_hdr->ether_type = htons(ETHERTYPE_ARP);
+		for (int i = 0; i < 6; i++) {
+			eth_hdr->ether_dhost[i] = 0xFF;
+		}
+		get_interface_mac(best_route->interface, eth_hdr->ether_shost);
+		queue_enq(q, temp);
+		send_arp(best_route->next_hop, inet_addr(get_interface_ip(packet->interface)), best_route->interface, 1, eth_hdr);
 		return;
 	}
 	get_interface_mac(best_route->interface, eth_hdr->ether_shost);
 	memcpy(eth_hdr->ether_dhost, arp_entry->mac, sizeof(arp_entry->mac));
-	// memcpy(eth_hdr->ether_shost, arp_entry->mac, sizeof(arp_entry->mac));
-	send_to_link(best_route->interface, buf, size);
+	send_to_link(best_route->interface, packet->payload, packet->size);
 }
 
 int comparator (const struct route_table_entry *entry1, const struct route_table_entry *entry2) {
@@ -166,13 +201,14 @@ int main(int argc, char *argv[])
 
 	rtable = malloc(sizeof(struct route_table_entry) * 80000);
 	DIE(rtable == NULL, "memory incorrect allocated");
-	arp_table = malloc(sizeof(struct arp_table_entry) * 100);
+	arp_table = malloc(sizeof(struct arp_table_entry) * 10);
 	DIE(arp_table == NULL, "memory incorrect allocated");
 
 	q = queue_create();
 	rtable_len = read_rtable(argv[1], rtable);
 	qsort(rtable, rtable_len, sizeof(struct route_table_entry), (int (*)(const void*, const void*))comparator);
-	arp_table_size = parse_arp_table("arp_table.txt", arp_table);
+	// arp_table_size = parse_arp_table("arp_table.txt", arp_table);
+	arp_table_size = 0;
 	
 	DIE(rtable_len < 0, "error");
 
@@ -205,10 +241,36 @@ int main(int argc, char *argv[])
 			} else {
 				struct packet *new_packet = create_packet(buf, len, interface);
 				forwarding(new_packet);
+				continue;
 			}
-		} else {
+		}
+		if (ntohs(eth_hdr->ether_type) == ETHERTYPE_ARP) {
+			struct arp_header *arp_hdr = (struct arp_header*)(buf + sizeof(struct ether_header));
+			if (ntohs(arp_hdr->op) == 1) {
+				printf("Interfata: %u TPA: %u\n", inet_addr(get_interface_ip(interface)), arp_hdr->tpa);
+				if (inet_addr(get_interface_ip(interface)) == arp_hdr->tpa){
+				printf("GETS HERE on ARP\n");
+				swap_mac_addresses(eth_hdr);
+				get_interface_mac(interface, eth_hdr->ether_shost);
+				send_arp(arp_hdr->spa, arp_hdr->tpa, interface, 2, eth_hdr);
+				} else {
+					struct packet *new_packet = create_packet(buf, len, interface);
+				forwarding(new_packet);
+				continue;
+				}
+			}
+			if (ntohs(arp_hdr->op) == 2) {
+				arp_table[arp_table_size].ip = arp_hdr->spa;
+				memcpy(arp_table[arp_table_size].mac, arp_hdr->sha, 6);
+				arp_table_size++;
+				if (!queue_empty(q)) {
+					// struct packet* packet = queue_deq(q);
+					// forwarding(packet);
+					forwarding(create_packet(buf,len,interface));
+				}
+			}
 			continue;
 		}
-
+		continue;
 	}
 }
