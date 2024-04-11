@@ -145,20 +145,6 @@ void forwarding(struct packet *packet) {
 	send_to_link(best_route->interface, buf, size);
 }
 
-uint32_t convert_ip(char *ip) {
-	char bytes[4];
-	char* token = strtok (ip, ".");
-	int i = 0;
-	while(token != NULL) {
-		bytes[i] = (uint32_t) atoi(token);
-		token = strtok (NULL, ".");
-		i++;
-	}
-    uint32_t result = (uint32_t)((bytes[0] << 24) |
-				(bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
-	return result;
-}
-
 int comparator (const struct route_table_entry *entry1, const struct route_table_entry *entry2) {
 	if (entry1->mask > entry2->mask)
 		return -1;
