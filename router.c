@@ -20,7 +20,8 @@ struct packet {
 struct packet *create_packet(char *buf, size_t size, int interface) {
 	struct packet *new_packet = malloc(sizeof (struct packet));
 	new_packet->interface = interface;
-	new_packet->payload = buf;
+	new_packet->payload =(char *) malloc(size);
+	memcpy(new_packet->payload, buf, size);
 	new_packet->size = size;
 	return new_packet;
 }
@@ -160,18 +161,19 @@ void forwarding(struct packet *packet) {
 	ip_hdr->check = 0;
 	new_checksum = htons(checksum((uint16_t *) ip_hdr, sizeof(struct iphdr)));
 	ip_hdr->check = new_checksum;
-	// verifici daca urmatorul hop se afla in tabela arp
 	struct arp_table_entry *arp_entry = get_arp_entry(best_route->next_hop);
 	if (arp_entry == NULL) {
 		printf("%d\n", arp_table_size);
 		struct packet *temp = malloc(sizeof(struct packet));
-		memcpy(temp, &packet, sizeof(packet));
-		eth_hdr->ether_type = htons(ETHERTYPE_ARP);
+		memcpy(temp, packet, sizeof(*packet));
+		queue_enq(q, temp);
+
+		// memcpy(temp->payload, packet->payload, packet->size);
 		for (int i = 0; i < 6; i++) {
 			eth_hdr->ether_dhost[i] = 0xFF;
 		}
 		get_interface_mac(best_route->interface, eth_hdr->ether_shost);
-		queue_enq(q, temp);
+		eth_hdr->ether_type = htons(ETHERTYPE_ARP);
 		send_arp(best_route->next_hop, inet_addr(get_interface_ip(packet->interface)), best_route->interface, 1, eth_hdr);
 		return;
 	}
@@ -221,14 +223,8 @@ int main(int argc, char *argv[])
 		DIE(interface < 0, "recv_from_any_links");
 
 		struct ether_header *eth_hdr = (struct ether_header *) buf;
-		/* Note that packets received are in network order,
-		any header field which has more than 1 byte will need to be conerted to
-		host order. For example, ntohs(eth_hdr->ether_type). The oposite is needed when
-		sending a packet on the link, */
 		struct iphdr *ip_hdr = (struct iphdr*) (buf + sizeof(struct ether_header));
-		// if I'm sending an ipv4 protocol than verify if the router is the destination
 		if (ntohs(eth_hdr->ether_type) == ETHERTYPE_IP) {
-			char *router_ip = get_interface_ip(interface);
 			if (ip_hdr->protocol == 1 && ip_hdr->daddr == inet_addr(get_interface_ip(interface))) {
 				printf("protocol\n");
 					struct icmphdr *icmp_hdr = (struct icmphdr *) (buf + sizeof(struct ether_header) + sizeof(struct iphdr));
@@ -255,19 +251,43 @@ int main(int argc, char *argv[])
 				send_arp(arp_hdr->spa, arp_hdr->tpa, interface, 2, eth_hdr);
 				} else {
 					struct packet *new_packet = create_packet(buf, len, interface);
-				forwarding(new_packet);
-				continue;
+					forwarding(new_packet);
+					continue;
 				}
 			}
-			if (ntohs(arp_hdr->op) == 2) {
+			else if (ntohs(arp_hdr->op) == 2) {
 				arp_table[arp_table_size].ip = arp_hdr->spa;
 				memcpy(arp_table[arp_table_size].mac, arp_hdr->sha, 6);
 				arp_table_size++;
-				if (!queue_empty(q)) {
-					// struct packet* packet = queue_deq(q);
-					// forwarding(packet);
-					forwarding(create_packet(buf,len,interface));
+				printf("REPLY\n");
+				if (queue_empty(q)) {
+					printf("Coada e goala\n");
 				}
+				if (!queue_empty(q))
+				{
+					struct packet *temp = (struct packet *)queue_deq(q);
+					struct iphdr *ip_hdr = (struct iphdr*)(temp->payload + sizeof(struct ether_header));
+					struct route_table_entry *best_route = get_best_route_bs(ip_hdr->daddr, 0, rtable_len - 1);
+					printf("Adresa ip:");
+
+					int ipadr = ntohl(ip_hdr->daddr);
+					for (char * it = (char*)&ipadr, *ref = it; it != ref + 4; it++) {
+						printf("%u.", (uint8_t)*it);
+					}
+					printf("\n");
+										printf("WANT to print\n");
+
+					if (best_route == NULL) {
+						printf("Nu exista ruta\n");
+						continue;
+					}
+					// get_interface_mac(best_route->interface, eth_hdr1->ether_shost);
+					// memcpy(eth_hdr1->ether_dhost, arp_hdr->sha, 6);
+					// send_to_link(best_route->interface, temp->payload, temp->size);
+					forwarding(temp);
+					// forwarding(create_packet(temp->payload, temp->size, best_route->interface));
+				}
+				continue;
 			}
 			continue;
 		}
